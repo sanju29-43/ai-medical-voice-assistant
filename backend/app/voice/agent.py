@@ -21,7 +21,7 @@ from .tools import ClinicInfoTool, DoctorTool, AvailabilityTool, BookingTool, Ca
 
 logger = logging.getLogger(__name__)
 
-from pipecat.transports.websocket.server import WebsocketServerTransport, SingleClientWebsocketServerParams
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, TextFrame, UserStartedSpeakingFrame, VADUserStartedSpeakingFrame, BotStoppedSpeakingFrame, EndFrame
@@ -140,11 +140,11 @@ class ActivityMonitor(FrameProcessor):
             pass
 
 async def run_voice_agent(
-    transport_type: str = "websocket",
+    websocket,
     language: str = "en",
+    transport_type: str = "websocket",
     room_url: Optional[str] = None,
-    token: Optional[str] = None,
-    websocket_port: int = 8765
+    token: Optional[str] = None
 ):
     # Select components
     groq_key = settings.GROQ_API_KEY
@@ -164,16 +164,16 @@ async def run_voice_agent(
         )
         transport = DailyTransport(room_url, token, "AI Receptionist", params)
     else:
-        # Fallback to local Websocket transport
-        logger.info(f"Starting agent on Websocket transport host: localhost, port: {websocket_port}")
-        ws_params = SingleClientWebsocketServerParams(
+        # FastAPI WebSockets transport
+        logger.info("Initializing FastAPIWebsocketTransport for voice agent.")
+        ws_params = FastAPIWebsocketParams(
             audio_out_enabled=True,
+            audio_out_sample_rate=16000,
             audio_in_enabled=True,
             audio_in_sample_rate=16000,
-            audio_out_sample_rate=16000,
             serializer=AudioSerializer()
         )
-        transport = WebsocketServerTransport(ws_params, host="localhost", port=websocket_port)
+        transport = FastAPIWebsocketTransport(websocket, ws_params)
 
     # 2. Setup Services
     # LLM

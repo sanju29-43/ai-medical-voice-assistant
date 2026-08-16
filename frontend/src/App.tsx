@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Globe, Database, Calendar, Award, User, Clock, ShieldCheck, Activity } from 'lucide-react';
-import DailyIframe from '@daily-co/daily-js';
+/// <reference types="vite/client" />
+import { useState, useEffect, useRef } from 'react';
+import { Phone, PhoneOff, Database, Calendar, Award, User, Clock, ShieldCheck, Activity } from 'lucide-react';
 
-// Status types
+const API_URL = import.meta.env.VITE_API_URL || '';
+
 type ConnectionStatus = 'Ready' | 'Connecting...' | 'Listening...' | 'Thinking...' | 'Speaking...' | 'Appointment confirmed' | 'Call ended' | 'Error';
 
 export default function App() {
@@ -24,7 +25,6 @@ export default function App() {
     status: '—'
   });
 
-  const dailyCallRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -64,7 +64,7 @@ export default function App() {
     const pollInterval = setInterval(async () => {
       if (status !== 'Ready') {
         try {
-          const res = await fetch('/api/appointments/latest');
+          const res = await fetch(API_URL + '/api/appointments/latest');
           if (res.ok) {
             const data = await res.json();
             if (data.status !== 'none' && data.id > lastKnownAppointmentIdRef.current) {
@@ -94,7 +94,7 @@ export default function App() {
       status: '—'
     });
     try {
-      const res = await fetch('/api/appointments/latest');
+      const res = await fetch(API_URL + '/api/appointments/latest');
       if (res.ok) {
         const data = await res.json();
         lastKnownAppointmentIdRef.current = data.id || 0;
@@ -104,103 +104,86 @@ export default function App() {
     }
   };
 
-  // Start Call Session (handles WebSocket or Daily.co based on backend environment settings)
+  // Start Call Session (handles WebSocket based on backend environment settings)
   const startCall = async () => {
     setStatus('Connecting...');
     await resetAppointmentPanel();
     try {
       // 1. Create a voice session by calling backend session endpoint
-      const response = await fetch('/api/voice/session', {
+      const response = await fetch(API_URL + '/api/voice/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          language,
-          room_url: 'https://custom-mock-room.daily.co/reception' // Or dynamically generated
+          language
         })
       });
       const data = await response.json();
       
       if (!response.ok) throw new Error(data.detail || 'Failed to start session');
 
-      if (data.transport === 'daily') {
-        // Daily WebRTC transport flow
-        const call = DailyIframe.createCallObject();
-        dailyCallRef.current = call;
+      // Direct local/remote WebSocket transport flow
+      const ws = new WebSocket(data.ws_url);
+      wsRef.current = ws;
 
-        call.on('joining-meeting', () => setStatus('Connecting...'));
-        call.on('joined-meeting', () => setStatus('Listening...'));
-        call.on('left-meeting', () => {
-          setStatus('Call ended');
-          dailyCallRef.current = null;
-        });
-        call.on('error', () => setStatus('Error'));
+      ws.onopen = async () => {
+        setStatus('Listening...');
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          micStreamRef.current = stream;
+          audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+          const source = audioContextRef.current.createMediaStreamSource(stream);
+          
+          const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+          source.connect(processor);
+          processor.connect(audioContextRef.current.destination);
 
-        await call.join({ url: data.room_url });
-      } else {
-        // Direct local WebSocket transport flow
-        const ws = new WebSocket(data.ws_url || 'ws://localhost:8765');
-        wsRef.current = ws;
-
-        ws.onopen = async () => {
-          setStatus('Listening...');
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            micStreamRef.current = stream;
-            audioContextRef.current = new AudioContext({ sampleRate: 16000 });
-            const source = audioContextRef.current.createMediaStreamSource(stream);
-            
-            const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-            source.connect(processor);
-            processor.connect(audioContextRef.current.destination);
-
-            processor.onaudioprocess = (e) => {
-              if (ws.readyState === WebSocket.OPEN) {
-                const inputData = e.inputBuffer.getChannelData(0);
-                const pcmData = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                  pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-                }
-                ws.send(pcmData.buffer);
+          processor.onaudioprocess = (e) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              const inputData = e.inputBuffer.getChannelData(0);
+              const pcmData = new Int16Array(inputData.length);
+              for (let i = 0; i < inputData.length; i++) {
+                pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
               }
-            };
-          } catch (e) {
-            console.error('Mic access denied:', e);
-            setStatus('Error');
-            stopCall();
-          }
-        };
-
-        ws.onmessage = async (e) => {
-          try {
-            if (e.data instanceof Blob) {
-              setStatus('Speaking...');
-              if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
-              speakingTimeoutRef.current = setTimeout(() => {
-                setStatus('Listening...');
-              }, 1500);
-              const arrayBuffer = await e.data.arrayBuffer();
-              playPcmAudio(arrayBuffer);
-            } else {
-              const msg = JSON.parse(e.data);
-              if (msg.type === 'appointment_extracted') {
-                setAppointmentInfo(msg.data);
-              }
+              ws.send(pcmData.buffer);
             }
-          } catch (err) {
-            // ignore
-          }
-        };
-
-        ws.onclose = () => {
-          setStatus('Call ended');
-          stopCall();
-        };
-
-        ws.onerror = () => {
+          };
+        } catch (e) {
+          console.error('Mic access denied:', e);
           setStatus('Error');
           stopCall();
-        };
-      }
+        }
+      };
+
+      ws.onmessage = async (e) => {
+        try {
+          if (e.data instanceof Blob) {
+            setStatus('Speaking...');
+            if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+            speakingTimeoutRef.current = setTimeout(() => {
+              setStatus('Listening...');
+            }, 1500);
+            const arrayBuffer = await e.data.arrayBuffer();
+            playPcmAudio(arrayBuffer);
+          } else {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'appointment_extracted') {
+              setAppointmentInfo(msg.data);
+            }
+          }
+        } catch (err) {
+          // ignore
+        }
+      };
+
+      ws.onclose = () => {
+        setStatus('Call ended');
+        stopCall();
+      };
+
+      ws.onerror = () => {
+        setStatus('Error');
+        stopCall();
+      };
     } catch (err: any) {
       console.error(err);
       setStatus('Error');
@@ -212,12 +195,7 @@ export default function App() {
       clearTimeout(speakingTimeoutRef.current);
       speakingTimeoutRef.current = null;
     }
-    // Stop Daily
-    if (dailyCallRef.current) {
-      dailyCallRef.current.leave();
-      dailyCallRef.current.destroy();
-      dailyCallRef.current = null;
-    }
+
     // Stop WebSockets
     if (wsRef.current) {
       wsRef.current.close();

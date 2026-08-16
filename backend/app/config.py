@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     SARVAM_API_KEY: str = ""
     
     # Google Calendar Credentials JSON contents
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "")
     GOOGLE_SERVICE_ACCOUNT_JSON: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     GOOGLE_CALENDAR_ID: str = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 

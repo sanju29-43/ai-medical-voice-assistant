@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Query, status, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import datetime
@@ -13,9 +13,13 @@ from .config import settings
 app = FastAPI(title="AI Medical Voice Assistant API")
 
 # Configure CORS
+origins = ["*"]
+if settings.FRONTEND_URL:
+    origins = [settings.FRONTEND_URL, "http://localhost:5173", "http://localhost:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -354,55 +358,26 @@ import asyncio
 import traceback
 from .voice.agent import run_voice_agent
 
-active_tasks = []
-
 class SessionRequest(BaseModel):
     language: str = "en"
-    room_url: Optional[str] = None
-    token: Optional[str] = None
-
-async def run_agent_with_logging(*args, **kwargs):
-    try:
-        await run_voice_agent(*args, **kwargs)
-    except Exception as e:
-        print(f"CRITICAL: Voice Agent pipeline failed! Error: {e}")
-        traceback.print_exc()
-        raise e
 
 @app.post("/api/voice/session")
-async def start_voice_session(req: SessionRequest):
-    # Cancel previous tasks to free port 8765 immediately
-    for old_task in active_tasks:
-        if not old_task.done():
-            old_task.cancel()
-            try:
-                await old_task
-            except asyncio.CancelledError:
-                pass
-    active_tasks.clear()
+async def start_voice_session(req: SessionRequest, request: Request):
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    host = request.headers.get("host", "localhost:8000")
+    ws_url = f"{scheme}://{host}/ws?language={req.language}"
+    return {"status": "started", "transport": "websocket", "ws_url": ws_url}
 
-    # Determine transport type from environment config setting VOICE_TRANSPORT
-    transport_type = settings.VOICE_TRANSPORT.lower()
-
-    if transport_type == "daily":
-        if not req.room_url:
-            raise HTTPException(status_code=400, detail="room_url is required for daily transport")
-        task = asyncio.create_task(run_agent_with_logging(
-            transport_type="daily",
-            language=req.language,
-            room_url=req.room_url,
-            token=req.token
-        ))
-        active_tasks.append(task)
-        return {"status": "started", "transport": "daily", "room_url": req.room_url}
-    else:
-        # Launch local websocket agent
-        task = asyncio.create_task(run_agent_with_logging(
-            transport_type="websocket",
-            language=req.language,
-            websocket_port=8765
-        ))
-        active_tasks.append(task)
-        return {"status": "started", "transport": "websocket", "ws_url": "ws://localhost:8765"}
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    language = websocket.query_params.get("language", "en")
+    try:
+        await run_voice_agent(websocket=websocket, language=language)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"Error in WebSocket session: {e}")
+        traceback.print_exc()
 
 
