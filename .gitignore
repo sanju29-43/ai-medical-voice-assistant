@@ -1,0 +1,22 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python virtual environment & cache
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node.js dependencies & builds
+node_modules/
+dist/
+build/
+
+# Local databases
+*.db
+*.db-journal
+
+google-service-account.json
