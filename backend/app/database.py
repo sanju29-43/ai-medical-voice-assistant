@@ -25,7 +25,40 @@ def seed_data():
     try:
         # Check if clinic already exists to avoid duplicate seeding
         if db.query(Clinic).first() is not None:
-            print("Database already seeded.")
+            print("Database already seeded. Checking rolling availability...")
+            today = datetime.date.today()
+            slots_exist = db.query(Availability).filter(Availability.date == today).first()
+            if not slots_exist:
+                print("Generating fresh rolling availability slots on startup...")
+                for i in range(7):
+                    current_date = today + datetime.timedelta(days=i)
+                    date_exists = db.query(Availability).filter(Availability.date == current_date).first()
+                    if date_exists:
+                        continue
+                    for doc in db.query(Doctor).all():
+                        slots = [
+                            (datetime.time(9, 0), datetime.time(9, 30)),
+                            (datetime.time(10, 0), datetime.time(10, 30)),
+                            (datetime.time(11, 0), datetime.time(11, 30)),
+                            (datetime.time(14, 0), datetime.time(14, 30)),
+                            (datetime.time(15, 0), datetime.time(15, 30)),
+                            (datetime.time(16, 0), datetime.time(16, 30)),
+                        ]
+                        for idx, (start, end) in enumerate(slots):
+                            status = "AVAILABLE"
+                            if idx == 2 and doc.specialization == "Dermatologist":
+                                status = "BLOCKED"
+                            elif idx == 4 and doc.specialization == "Cardiologist":
+                                status = "BOOKED"
+                            avail = Availability(
+                                doctor_id=doc.id,
+                                date=current_date,
+                                start_time=start,
+                                end_time=end,
+                                status=status
+                            )
+                            db.add(avail)
+                db.commit()
             return
             
         # Create a clinic
