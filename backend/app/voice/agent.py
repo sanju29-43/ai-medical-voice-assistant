@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from typing import Dict, Any, Optional
+import datetime
 
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -157,9 +158,10 @@ async def run_voice_agent(
     room_url: Optional[str] = None,
     token: Optional[str] = None
 ):
-    # Select components
     gemini_key = settings.GEMINI_API_KEY
     deepgram_key = settings.DEEPGRAM_API_KEY
+    today_str = datetime.date.today().strftime("%A, %B %d, %Y")
+    dynamic_prompt = f"Today's date is {today_str}.\n\n{SYSTEM_PROMPT}"
 
     # 1. Initialize Transport
     if transport_type == "daily":
@@ -191,7 +193,7 @@ async def run_voice_agent(
         api_key=gemini_key,
         settings=GoogleLLMService.Settings(
             model="gemini-3.5-flash-lite",
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=dynamic_prompt,
             max_tokens=512,
             thinking=GoogleLLMService.ThinkingConfig(
                 thinking_level="minimal",
@@ -305,7 +307,7 @@ async def run_voice_agent(
         )
     ]
 
-    context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}], tools=tools)
+    context = LLMContext(messages=[{"role": "system", "content": dynamic_prompt}], tools=tools)
     user_params = LLMUserAggregatorParams(
         user_turn_strategies=UserTurnStrategies(
             stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.6)]
