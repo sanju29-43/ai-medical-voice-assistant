@@ -213,13 +213,6 @@ export default function App() {
     setStatus('Ready');
   };
 
-  const toggleCall = () => {
-    if (status !== 'Ready' && status !== 'Call ended' && status !== 'Error') {
-      stopCall();
-    } else {
-      startCall();
-    }
-  };
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
@@ -250,21 +243,24 @@ export default function App() {
 
           {/* Action Trigger */}
           <div className="flex flex-col items-center">
-            <button
-              onClick={toggleCall}
-              className={`h-20 w-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg ${
-                status === 'Listening...' || status === 'Speaking...' || status === 'Thinking...'
-                  ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white hover:scale-105'
-              }`}
-            >
-              {status === 'Listening...' || status === 'Speaking...' || status === 'Thinking...' ? (
-                <PhoneOff className="h-8 w-8" />
-              ) : (
-                <Phone className="h-8 w-8" />
-              )}
-            </button>
-            <div className="mt-4 text-center">
+            {status === 'Listening...' || status === 'Speaking...' || status === 'Thinking...' || status === 'Connecting...' ? (
+              <button
+                onClick={stopCall}
+                className="flex items-center space-x-2 px-6 py-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-full shadow-lg transition-all duration-300 hover:scale-105"
+              >
+                <PhoneOff className="h-6 w-6 animate-pulse" />
+                <span>Hang Up</span>
+              </button>
+            ) : (
+              <button
+                onClick={startCall}
+                className="flex items-center space-x-2 px-6 py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-full shadow-lg transition-all duration-300 hover:scale-105"
+              >
+                <Phone className="h-6 w-6" />
+                <span>Start Call</span>
+              </button>
+            )}
+            <div className="mt-6 text-center">
               <div className="text-sm font-semibold text-gray-400 uppercase tracking-widest">Voice Status</div>
               <div className={`text-lg font-bold mt-1 ${
                 status === 'Listening...' ? 'text-green-500' :
