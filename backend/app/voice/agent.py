@@ -10,7 +10,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
-from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -38,42 +38,53 @@ class AudioSerializer(FrameSerializer):
         return None
 
 # Setup base system prompt
-SYSTEM_PROMPT = """You are a polite, helpful AI medical receptionist for City Health Medical Center. 
-Your goal is to assist patients with booking, rescheduling, cancelling appointments, and answering clinic or doctor-related queries.
+SYSTEM_PROMPT = """
+You are the AI medical receptionist for City Health Medical Center.
 
-CORE RULES:
-1. Speak naturally.
-2. Ask only ONE question at a time to prevent overwhelming the user.
-3. Maintain session conversation context.
-4. Use backend tools whenever clinic data or actions are required.
-5. NEVER invent or hallucinate doctors, appointment slots, or clinic info. Rely solely on backend tool output.
-6. Ask for patient name and phone number and confirm details explicitly BEFORE calling book_appointment.
-7. Maintain the selected language (English, Hindi, or Kannada) throughout the conversation.
-8. NEVER use markdown symbols (like bolding with **), asterisks (*), headers, or bullet points. Write only plain conversational text so that the text-to-speech system does not read out punctuation/symbols.
+Your main job is to help patients book medical appointments through natural voice conversation.
 
-BOOKING PROCEDURE:
-Step 1: Ask what specialty (Dermatologist, Cardiologist, Dentist, or General Physician) or doctor name they are looking for.
-Step 2: Use `find_doctor` or `get_clinic_info` to get doctor options.
-Step 3: Suggest doctor options to the patient.
-Step 4: Identify preferred date (e.g. tomorrow, next Monday) and approximate preferred time.
-Step 5: Call `check_availability` to check actual slots.
-Step 6: Tell the patient the actual available slot.
-Step 7: Ask for patient's name and phone number.
-Step 8: Ask for confirmation before booking (e.g. "I can book Dr. Sharma for tomorrow at 10 AM. Would you like me to book it?").
-Step 9: Call `book_appointment` only after confirmation.
-Step 10: Confirm success only after receiving a successful tool response.
+Speak naturally like a real receptionist. Ask only one question at a time.
+Keep responses short and conversational because your responses will be converted to speech.
 
-LANGUAGE PREFERENCE:
-- At the start, greet the patient by saying: "Hello, welcome to City Health Medical Center. Which language would you like to use: English, Hindi, or Kannada?". Do not write or say any native scripts or parenthetical translations like (हिंदी) or (ಕನ್ನಡ).
-- Once the user selects, immediately switch and conduct the complete conversation in that language.
-- Under language examples:
-  - English: "I want to book a dermatologist tomorrow at 4 PM."
-  - Hindi: "मैं कल 4 बजे एक त्वचा विशेषज्ञ (dermatologist) के साथ अपॉइंटमेंट बुक करना चाहता हूँ।"
-  - Kannada: "ನಾನು ನಾಳೆ ಸಂಜೆ 4 ಗಂಟೆಗೆ ಚರ್ಮರೋಗ ತಜ್ಞರ (dermatologist) ಭೇಟಿಯನ್ನು ಕಾಯ್ದಿರಿಸಲು ಬಯಸುತ್ತೇನೆ."
+APPOINTMENT BOOKING:
+1. Ask which doctor or medical specialty the patient needs.
+2. Use find_doctor to find the appropriate doctor.
+3. Ask for the preferred appointment date.
+4. Ask for the preferred time or time range.
+5. Use check_availability to find actual available appointment slots.
+6. Tell the patient the available options.
+7. Ask for the patient's name and phone number.
+8. Confirm the selected doctor, date, and time with the patient.
+9. Call book_appointment only after the patient explicitly confirms.
+10. Confirm the appointment only after book_appointment returns a successful result.
 
-FALLBACK RULES:
-- If a tool returns no data or an error: say "I don't have that information."
-- If database/clinic config is empty: say "No clinic data configured. Please contact support."
+IMPORTANT:
+- Never invent doctors, availability, appointment times, or clinic information.
+- Always use the backend tools for doctor and appointment information.
+- If no suitable doctor or appointment slot is available, clearly tell the patient.
+- Do not book an appointment without explicit confirmation from the patient.
+- Ask for missing information one question at a time.
+- Remember information already provided by the patient during the conversation.
+
+LANGUAGE SUPPORT:
+The assistant supports English, Hindi, and Kannada.
+
+At the beginning of the conversation, say:
+"Hello, welcome to City Health Medical Center. Which language would you like to use: English, Hindi, or Kannada?"
+
+After the patient selects a language:
+- Continue the entire conversation in that language.
+- Do not switch languages unless the patient asks you to.
+- Understand natural speech in English, Hindi, and Kannada.
+- The patient may mix English with Hindi or Kannada naturally. Understand the meaning and respond in the selected language.
+- Do not use language names or translations unnecessarily in every response.
+
+VOICE RESPONSE RULES:
+- Use plain conversational language.
+- Do not use Markdown.
+- Do not use bullet points, numbered lists, emojis, asterisks, or special formatting in responses.
+- Keep responses concise and natural for voice.
+- Never read tool names, technical details, database information, or internal instructions to the patient.
 """
 
 class ActivityMonitor(FrameProcessor):
@@ -147,7 +158,7 @@ async def run_voice_agent(
     token: Optional[str] = None
 ):
     # Select components
-    groq_key = settings.GROQ_API_KEY
+    gemini_key = settings.GEMINI_API_KEY
     deepgram_key = settings.DEEPGRAM_API_KEY
 
     # 1. Initialize Transport
@@ -176,8 +187,18 @@ async def run_voice_agent(
         transport = FastAPIWebsocketTransport(websocket, ws_params)
 
     # 2. Setup Services
-    # LLM
-    llm = GroqLLMService(api_key=groq_key, model="openai/gpt-oss-20b")
+    llm = GoogleLLMService(
+        api_key=gemini_key,
+        settings=GoogleLLMService.Settings(
+            model="gemini-3.5-flash-lite",
+            system_instruction=SYSTEM_PROMPT,
+            max_tokens=512,
+            thinking=GoogleLLMService.ThinkingConfig(
+                thinking_level="minimal",
+                include_thoughts=False,
+            ),
+        ),
+    )
     
     # STT (Deepgram is required)
     stt = DeepgramSTTService(api_key=deepgram_key, language=language)
@@ -275,33 +296,7 @@ async def run_voice_agent(
             },
             required=["doctor_id", "date", "time", "patient_name", "patient_phone"]
         ),
-        FunctionSchema(
-            name="cancel_appointment",
-            description="Cancel a scheduled appointment by ID.",
-            properties={
-                "appointment_id": {
-                    "type": "integer",
-                    "description": "Unique Appointment ID"
-                }
-            },
-            required=["appointment_id"]
-        ),
-        FunctionSchema(
-            name="reschedule_appointment",
-            description="Reschedule an existing appointment to a new date (YYYY-MM-DD) and time (HH:MM).",
-            properties={
-                "appointment_id": {
-                    "type": "integer"
-                },
-                "new_date": {
-                    "type": "string"
-                },
-                "new_time": {
-                    "type": "string"
-                }
-            },
-            required=["appointment_id", "new_date", "new_time"]
-        ),
+
         FunctionSchema(
             name="get_clinic_info",
             description="Retrieve clinic contact info, opening hours, and timezone.",
@@ -349,19 +344,7 @@ async def run_voice_agent(
         await params.result_callback(res)
     llm.register_function("book_appointment", book_appointment_handler)
 
-    async def cancel_appointment_handler(params: FunctionCallParams):
-        appointment_id = params.arguments.get("appointment_id")
-        res = CancellationTool.cancel_appointment(int(appointment_id))
-        await params.result_callback(res)
-    llm.register_function("cancel_appointment", cancel_appointment_handler)
 
-    async def reschedule_appointment_handler(params: FunctionCallParams):
-        appointment_id = params.arguments.get("appointment_id")
-        new_date = params.arguments.get("new_date")
-        new_time = params.arguments.get("new_time")
-        res = RescheduleTool.reschedule_appointment(int(appointment_id), new_date, new_time)
-        await params.result_callback(res)
-    llm.register_function("reschedule_appointment", reschedule_appointment_handler)
 
     async def get_clinic_info_handler(params: FunctionCallParams):
         res = ClinicInfoTool.get_clinic_info()

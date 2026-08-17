@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./medical_voice_assistant.db")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
     DAILY_API_KEY: str = os.getenv("DAILY_API_KEY", "")
     DAILY_API_URL: str = os.getenv("DAILY_API_URL", "https://api.daily.co/v1")
