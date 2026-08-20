@@ -8,16 +8,35 @@ type ConnectionStatus = 'Ready' | 'Connecting...' | 'Listening...' | 'Thinking..
 
 export default function App() {
   const [status, setStatus] = useState<ConnectionStatus>('Ready');
-  const language = 'en';
-  
+  const [sttProvider, setSttProvider] = useState<'deepgram' | 'elevenlabs' | 'sarvam'>('deepgram');
+  const [ttsProvider, setTtsProvider] = useState<'deepgram' | 'elevenlabs' | 'sarvam'>('sarvam');
+  const [selectedLanguage, setSelectedLanguage] = useState<'en' | 'hi' | 'kn'>('en');
+  const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([
+    { key: 'patient_name', value: '' },
+    { key: 'doctor_name', value: '' }
+  ]);
+  const [newKey, setNewKey] = useState('');
+  const [newValue, setNewValue] = useState('');
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [doctorsList, setDoctorsList] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetch(API_URL + '/api/doctors')
+      .then(res => res.json())
+      .then(data => setDoctorsList(data))
+      .catch(() => {});
+  }, []);
+
   // Real-time extracted appointment state
   const [appointmentInfo, setAppointmentInfo] = useState<{
+    id: string;
     doctor: string;
     specialty: string;
     date: string;
     time: string;
     status: string;
   }>({
+    id: '—',
     doctor: '—',
     specialty: '—',
     date: '—',
@@ -69,6 +88,7 @@ export default function App() {
             const data = await res.json();
             if (data.status !== 'none' && data.id > lastKnownAppointmentIdRef.current) {
               setAppointmentInfo({
+                id: data.id ? `APT-${data.id}` : '—',
                 doctor: data.doctor,
                 specialty: data.specialty,
                 date: data.date,
@@ -87,6 +107,7 @@ export default function App() {
 
   const resetAppointmentPanel = async () => {
     setAppointmentInfo({
+      id: '—',
       doctor: '—',
       specialty: '—',
       date: '—',
@@ -110,16 +131,24 @@ export default function App() {
     await resetAppointmentPanel();
     try {
       // 1. Create a voice session by calling backend session endpoint
+      const varMap: Record<string, string> = {};
+      variables.forEach(v => {
+        if (v.key) varMap[v.key] = v.value;
+      });
       const response = await fetch(API_URL + '/api/voice/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          language
+          language: selectedLanguage,
+          stt_provider: sttProvider,
+          tts_provider: ttsProvider,
+          variables: varMap
         })
       });
       const data = await response.json();
       
       if (!response.ok) throw new Error(data.detail || 'Failed to start session');
+      setActiveSessionId(data.session_id);
 
       // Direct local/remote WebSocket transport flow
       const ws = new WebSocket(data.ws_url);
@@ -168,6 +197,25 @@ export default function App() {
             const msg = JSON.parse(e.data);
             if (msg.type === 'appointment_extracted') {
               setAppointmentInfo(msg.data);
+            } else if (msg.type === 'appointment_extracted_update') {
+              setAppointmentInfo(prev => ({
+                ...prev,
+                date: msg.date || prev.date,
+                time: msg.time || prev.time
+              }));
+            } else if (msg.type === 'variable_extracted') {
+              const allVars = msg.all_variables || {};
+              const list = Object.keys(allVars).map(k => ({ key: k, value: allVars[k] }));
+              setVariables(list);
+              if (allVars.doctor_name) {
+                const docName = allVars.doctor_name;
+                const matchedDoc = doctorsList.find(d => d.name.toLowerCase().includes(docName.toLowerCase()));
+                setAppointmentInfo(prev => ({
+                  ...prev,
+                  doctor: docName,
+                  specialty: matchedDoc ? matchedDoc.specialization : '—'
+                }));
+              }
             }
           }
         } catch (err) {
@@ -211,6 +259,10 @@ export default function App() {
       audioContextRef.current = null;
     }
     setStatus('Ready');
+    setActiveSessionId('');
+    resetAppointmentPanel();
+    const resetVars = variables.map(v => ({ key: v.key, value: '' }));
+    setVariables(resetVars);
   };
 
 
@@ -226,16 +278,117 @@ export default function App() {
               <Activity className="h-5 w-5 animate-pulse" />
               <span className="text-sm tracking-wider uppercase">Your Virtual Receptionist</span>
             </div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-6">🏥 AI MEDICAL ASSISTANT</h1>
-            
-            {/* Supported Languages */}
-            <div className="space-y-4 mb-8 bg-gray-50 p-6 rounded-2xl">
+            <h1 className="text-2xl font-bold text-gray-900 mb-4">🏥 AI MEDICAL ASSISTANT</h1>
+            {/* Agent Settings Form */}
+            <div className="space-y-4 mb-6 bg-gray-50 p-6 rounded-2xl">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">STT Provider</label>
+                  <select
+                    value={sttProvider}
+                    onChange={(e) => setSttProvider(e.target.value as any)}
+                    className="w-full px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="deepgram">Deepgram</option>
+                    <option value="elevenlabs">ElevenLabs</option>
+                    <option value="sarvam">Sarvam AI</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">TTS Provider</label>
+                  <select
+                    value={ttsProvider}
+                    onChange={(e) => setTtsProvider(e.target.value as any)}
+                    className="w-full px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="sarvam">Sarvam AI</option>
+                    <option value="deepgram">Deepgram</option>
+                    <option value="elevenlabs">ElevenLabs</option>
+                  </select>
+                </div>
+              </div>
+
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">Supported Languages</label>
-                <div className="flex flex-wrap gap-2 mt-1">
-                  <span className="px-3 py-1 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700">English</span>
-                  <span className="px-3 py-1 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700">Hindi (हिंदी)</span>
-                  <span className="px-3 py-1 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700">Kannada (ಕನ್ನಡ)</span>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Language</label>
+                <select
+                  value={selectedLanguage}
+                  onChange={(e) => setSelectedLanguage(e.target.value as any)}
+                  className="w-full px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="en">English</option>
+                  <option value="hi">Hindi (हिंदी)</option>
+                  <option value="kn">Kannada (ಕನ್ನಡ)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">Dynamic Session Variables</label>
+                <div className="space-y-2 max-h-40 overflow-y-auto mb-3">
+                  {variables.filter(v => !['appointment_date', 'appointment_time', 'doctor_specialty', 'specialty', 'appointment_id', 'booking_status', 'language', 'clinic_name'].includes(v.key)).map((v, i) => {
+                    const originalIndex = variables.findIndex(item => item.key === v.key);
+                    return (
+                      <div key={i} className="flex justify-between items-center bg-white px-3 py-1.5 rounded-lg border border-gray-150 text-xs">
+                        <span className="font-semibold text-gray-600">{v.key}:</span>
+                        <input
+                          type="text"
+                          value={v.value}
+                          onChange={(e) => {
+                            const updated = [...variables];
+                            if (originalIndex !== -1) {
+                              updated[originalIndex].value = e.target.value;
+                              setVariables(updated);
+                            }
+                          }}
+                          className="text-right bg-transparent text-gray-800 focus:outline-none focus:border-blue-500 border-b border-transparent w-40"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Var Name"
+                    value={newKey}
+                    onChange={(e) => setNewKey(e.target.value)}
+                    className="flex-1 px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Var Value"
+                    value={newValue}
+                    onChange={(e) => setNewValue(e.target.value)}
+                    className="flex-1 px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (newKey && newValue) {
+                        setVariables([...variables, { key: newKey, value: newValue }]);
+                        if (activeSessionId) {
+                          try {
+                            await fetch(API_URL + '/api/variables', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                session_id: activeSessionId,
+                                name: newKey,
+                                value: newValue
+                              })
+                            });
+                          } catch (e) {
+                            console.error('Failed to save manual variable to DB:', e);
+                          }
+                        }
+                        setNewKey('');
+                        setNewValue('');
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs transition-all"
+                  >
+                    + Add
+                  </button>
                 </div>
               </div>
             </div>
@@ -312,6 +465,14 @@ export default function App() {
                 <div>
                   <div className="text-xs uppercase font-semibold text-gray-600 tracking-wider">Time</div>
                   <div className="text-base font-semibold mt-0.5">{appointmentInfo.time}</div>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-4">
+                <Database className="h-5 w-5 text-gray-600 mt-1" />
+                <div>
+                  <div className="text-xs uppercase font-semibold text-gray-600 tracking-wider">Appointment ID</div>
+                  <div className="text-base font-semibold mt-0.5">{appointmentInfo.id}</div>
                 </div>
               </div>
 

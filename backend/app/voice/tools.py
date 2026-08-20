@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any, List
 from ..database import SessionLocal
 from ..models import Clinic, Doctor, Availability, Appointment
 from ..validation import validate_appointment_booking
-from ..services.calendar_service import create_calendar_event, cancel_calendar_event, update_calendar_event
+from ..services.calendar_service import create_calendar_event, cancel_calendar_event, update_calendar_event, check_calendar_availability
 
 class ClinicInfoTool:
     @staticmethod
@@ -344,3 +344,75 @@ class RescheduleTool:
             }
         finally:
             db.close()
+
+import httpx
+
+class ExternalAPITool:
+    @staticmethod
+    async def check_insurance_status(policy_number: str, patient_name: str, dynamic_vars: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        url = "https://httpbin.org/post"
+        payload = {
+            "policy_number": policy_number,
+            "patient_name": patient_name,
+            "verification_source": "City Health Partner Network"
+        }
+        if dynamic_vars:
+            payload.update(dynamic_vars)
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload, timeout=10.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    json_sent = data.get("json", {})
+                    return {
+                        "status": "success",
+                        "policy_verified": True,
+                        "copay_percentage": 10.0,
+                        "insurance_provider": json_sent.get("insurance_provider", "Apollo Munich Health"),
+                        "response_received": json_sent
+                    }
+                else:
+                    return {"error": f"External API returned status {response.status_code}"}
+            except Exception as e:
+                return {"error": f"Failed to connect to external REST API: {str(e)}"}
+
+class GoogleCalendarTool:
+    @staticmethod
+    def check_calendar_availability(start_time_str: str, end_time_str: str) -> Dict[str, Any]:
+        try:
+            start_time = datetime.datetime.fromisoformat(start_time_str)
+            end_time = datetime.datetime.fromisoformat(end_time_str)
+            available = check_calendar_availability(start_time, end_time)
+            return {"status": "success", "available": available}
+        except Exception as e:
+            return {"error": f"Invalid datetime format or calendar error: {e}"}
+
+    @staticmethod
+    def create_calendar_event(summary: str, start_time_str: str, end_time_str: str, description: str = "") -> Dict[str, Any]:
+        try:
+            start_time = datetime.datetime.fromisoformat(start_time_str)
+            end_time = datetime.datetime.fromisoformat(end_time_str)
+            event_id = create_calendar_event(summary, start_time, end_time, description)
+            return {"status": "success", "event_id": event_id}
+        except Exception as e:
+            return {"error": f"Calendar event creation failed: {e}"}
+
+    @staticmethod
+    def update_calendar_event(event_id: str, start_time_str: str, end_time_str: str) -> Dict[str, Any]:
+        try:
+            start_time = datetime.datetime.fromisoformat(start_time_str)
+            end_time = datetime.datetime.fromisoformat(end_time_str)
+            update_calendar_event(event_id, start_time, end_time)
+            return {"status": "success"}
+        except Exception as e:
+            return {"error": f"Calendar event update failed: {e}"}
+
+    @staticmethod
+    def delete_calendar_event(event_id: str) -> Dict[str, Any]:
+        try:
+            cancel_calendar_event(event_id)
+            return {"status": "success"}
+        except Exception as e:
+            return {"error": f"Calendar event deletion failed: {e}"}
+
+

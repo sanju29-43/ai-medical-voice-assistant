@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     DAILY_API_URL: str = os.getenv("DAILY_API_URL", "https://api.daily.co/v1")
     VOICE_TRANSPORT: str = "websocket"
     SARVAM_API_KEY: str = ""
+    ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
     
     # Google Calendar Credentials JSON contents
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "")

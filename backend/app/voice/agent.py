@@ -3,6 +3,7 @@ import asyncio
 import logging
 from typing import Dict, Any, Optional
 import datetime
+import aiohttp
 
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -13,19 +14,23 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.deepgram.tts import DeepgramTTSService
+from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
+from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.services.llm_service import FunctionCallParams
 
 from ..config import settings
-from .tools import ClinicInfoTool, DoctorTool, AvailabilityTool, BookingTool, CancellationTool, RescheduleTool
+from .tools import ClinicInfoTool, DoctorTool, AvailabilityTool, BookingTool, CancellationTool, RescheduleTool, ExternalAPITool, GoogleCalendarTool
 
 logger = logging.getLogger(__name__)
 
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
-from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, TextFrame, UserStartedSpeakingFrame, VADUserStartedSpeakingFrame, BotStoppedSpeakingFrame, EndFrame
+from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, TextFrame, UserStartedSpeakingFrame, VADUserStartedSpeakingFrame, BotStoppedSpeakingFrame, EndFrame, LLMContextFrame
 
 class AudioSerializer(FrameSerializer):
     async def serialize(self, frame: Frame) -> str | bytes | None:
@@ -40,9 +45,9 @@ class AudioSerializer(FrameSerializer):
 
 # Setup base system prompt
 SYSTEM_PROMPT = """
-You are the AI medical receptionist for City Health Medical Center.
+You are the AI medical receptionist for {{clinic_name}}.
 
-Your main job is to help patients book medical appointments through natural voice conversation.
+Your main job is to help patients book, reschedule, cancel, and inquire about medical appointments through natural voice conversation.
 
 Speak naturally like a real receptionist. Ask only one question at a time.
 Keep responses short and conversational because your responses will be converted to speech.
@@ -59,26 +64,46 @@ APPOINTMENT BOOKING:
 9. Call book_appointment only after the patient explicitly confirms.
 10. Confirm the appointment only after book_appointment returns a successful result.
 
+APPOINTMENT RESCHEDULING:
+1. When the patient wants to reschedule, first ask for their Appointment ID.
+2. Search or find the existing appointment details.
+3. Ask for the preferred new date and time.
+4. Call check_availability to find available slots for the doctor.
+5. Present options, ask the patient for explicit confirmation to change the slot.
+6. Only call reschedule_appointment after the patient confirms.
+7. Confirm through voice once rescheduled successfully.
+
+APPOINTMENT CANCELLATION:
+1. When the patient wants to cancel, ask for their Appointment ID.
+2. Find the existing appointment details, and verify them with the patient.
+3. Ask the patient for explicit confirmation: "Do you want to cancel your appointment with Dr. [name] on [date]?"
+4. Only call cancel_appointment after they confirm.
+5. Confirm cancellation through voice once successful.
+
+INSURANCE CHECK / API TOOL:
+1. If the patient inquires about insurance verification, call check_insurance_status tool with their policy number and patient name.
+2. Use the result (copay, provider, status) to guide the patient.
+
+DYNAMIC VARIABLES COLLECTION:
+1. If the patient tells you their name (e.g., "My name is Sanjana") or doctor preference during the conversation, call the update_session_variable tool (e.g. name="patient_name", value="Sanjana") to save it.
+
 IMPORTANT:
 - Never invent doctors, availability, appointment times, or clinic information.
 - Always use the backend tools for doctor and appointment information.
 - If no suitable doctor or appointment slot is available, clearly tell the patient.
-- Do not book an appointment without explicit confirmation from the patient.
+- Do not perform booking, rescheduling, or cancellation without explicit confirmation from the patient.
 - Ask for missing information one question at a time.
-- Remember information already provided by the patient during the conversation.
 
 LANGUAGE SUPPORT:
 The assistant supports English, Hindi, and Kannada.
 
 At the beginning of the conversation, say:
-"Hello, welcome to City Health Medical Center. Which language would you like to use: English, Hindi, or Kannada?"
+"Hello {{patient_name}}, welcome to {{clinic_name}}. Which language would you like to use: English, Hindi, or Kannada?"
 
 After the patient selects a language:
 - Continue the entire conversation in that language.
 - Do not switch languages unless the patient asks you to.
-- Understand natural speech in English, Hindi, and Kannada.
-- The patient may mix English with Hindi or Kannada naturally. Understand the meaning and respond in the selected language.
-- Do not use language names or translations unnecessarily in every response.
+- Support booking, cancellation, rescheduling, and general clinic queries in all three languages.
 
 VOICE RESPONSE RULES:
 - Use plain conversational language.
@@ -156,12 +181,69 @@ async def run_voice_agent(
     language: str = "en",
     transport_type: str = "websocket",
     room_url: Optional[str] = None,
-    token: Optional[str] = None
+    token: Optional[str] = None,
+    stt_provider: str = "deepgram",
+    tts_provider: str = "sarvam",
+    variables: dict = None,
+    session_id: Optional[str] = None
 ):
     gemini_key = settings.GEMINI_API_KEY
     deepgram_key = settings.DEEPGRAM_API_KEY
     today_str = datetime.date.today().strftime("%A, %B %d, %Y")
-    dynamic_prompt = f"Today's date is {today_str}.\n\n{SYSTEM_PROMPT}"
+    session = aiohttp.ClientSession()
+
+    # Dynamic variables setup
+    session_vars = variables or {}
+    default_vars = {
+        "patient_name": "",
+        "doctor_name": "",
+        "clinic_name": "City Health Medical Center"
+    }
+    for k, v in default_vars.items():
+        if k not in session_vars or session_vars[k] is None:
+            session_vars[k] = v
+            logger.info(
+                f"[DYNAMIC VARIABLE]\n"
+                f"source=default\n"
+                f"key={k}\n"
+                f"old_value=\n"
+                f"new_value={v}"
+            )
+        else:
+            logger.info(
+                f"[DYNAMIC VARIABLE]\n"
+                f"source=frontend\n"
+                f"key={k}\n"
+                f"old_value=\n"
+                f"new_value={session_vars[k]}"
+            )
+
+    # Resolve variables in SYSTEM_PROMPT
+    resolved_prompt = SYSTEM_PROMPT
+    
+    greeting_instruction = 'At the beginning of the conversation, say:\n"Hello {{patient_name}}, welcome to {{clinic_name}}. Which language would you like to use: English, Hindi, or Kannada?"'
+    
+    if language == "hi":
+        if session_vars.get("patient_name"):
+            new_greeting = 'At the beginning of the conversation, greet the patient by name in Hindi. Say:\n"नमस्ते {{patient_name}}, {{clinic_name}} में आपका स्वागत है। आज मैं आपकी क्या मदद कर सकता हूँ?"\nDo NOT ask them to choose a language.'
+        else:
+            new_greeting = 'At the beginning of the conversation, greet the patient in Hindi. Say:\n"नमस्ते, {{clinic_name}} में आपका स्वागत है। क्या मैं आपका नाम जान सकता हूँ?"\nDo NOT ask them to choose a language.'
+    elif language == "kn":
+        if session_vars.get("patient_name"):
+            new_greeting = 'At the beginning of the conversation, greet the patient by name in Kannada. Say:\n"ನಮಸ್ಕಾರ {{patient_name}}, {{clinic_name}} ಗೆ ಸುಸ್ವಾಗತ. ಇಂದು ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?"\nDo NOT ask them to choose a language.'
+        else:
+            new_greeting = 'At the beginning of the conversation, greet the patient in Kannada. Say:\n"ನಮಸ್ಕಾರ, {{clinic_name}} ಗೆ ಸುಸ್ವಾಗತ. ನಾನು ನಿಮ್ಮ ಹೆಸರನ್ನು ತಿಳಿಯಬಹುದೇ?"\nDo NOT ask them to choose a language.'
+    else:
+        if session_vars.get("patient_name"):
+            new_greeting = 'At the conversation start, greet the patient by name in English. Say:\n"Hello {{patient_name}}, welcome to {{clinic_name}}. How can I help you today?"\nDo NOT ask them to choose a language.'
+        else:
+            new_greeting = 'At the conversation start, greet the patient in English. Say:\n"Hello, welcome to {{clinic_name}}. May I know your name?"\nDo NOT ask them to choose a language.'
+
+    resolved_prompt = resolved_prompt.replace(greeting_instruction, new_greeting)
+    for k, v in session_vars.items():
+        resolved_prompt = resolved_prompt.replace(f"{{{{{k}}}}}", str(v))
+
+    dynamic_prompt = f"Today's date is {today_str}.\n\n{resolved_prompt}"
 
     # 1. Initialize Transport
     if transport_type == "daily":
@@ -188,7 +270,7 @@ async def run_voice_agent(
         )
         transport = FastAPIWebsocketTransport(websocket, ws_params)
 
-    # 2. Setup Services
+    # 2. Setup Services (LLM)
     llm = GoogleLLMService(
         api_key=gemini_key,
         settings=GoogleLLMService.Settings(
@@ -201,32 +283,56 @@ async def run_voice_agent(
             ),
         ),
     )
-    
-    # STT (Deepgram is required)
-    stt = DeepgramSTTService(api_key=deepgram_key, language=language)
 
-    # TTS (Sarvam Bulbul v3 is the fixed TTS provider)
-    sarvam_key = settings.SARVAM_API_KEY
-    if not sarvam_key:
-        logger.error("SARVAM_API_KEY environment variable is missing or empty!")
-        raise ValueError("SARVAM_API_KEY is not configured on the backend. Please add it to your .env file.")
+    # 3. Setup STT Service
+    stt_provider = stt_provider.lower()
+    if stt_provider == "elevenlabs":
+        eleven_key = settings.ELEVENLABS_API_KEY
+        if not eleven_key:
+            raise ValueError("ELEVENLABS_API_KEY is not configured on the backend.")
+        stt = ElevenLabsSTTService(api_key=eleven_key, aiohttp_session=session)
+    elif stt_provider == "sarvam":
+        sarvam_key = settings.SARVAM_API_KEY
+        if not sarvam_key:
+            raise ValueError("SARVAM_API_KEY is not configured on the backend.")
+        stt = SarvamSTTService(api_key=sarvam_key)
+    else:
+        stt = DeepgramSTTService(api_key=deepgram_key, language=language)
 
-    language_map = {
-        "en": "en-IN",
-        "hi": "hi-IN",
-        "kn": "kn-IN",
-    }
-    target_language = language_map.get(language, "en-IN")
-
-    tts = SarvamTTSService(
-        api_key=sarvam_key,
-        sample_rate=16000,
-        settings=SarvamTTSService.Settings(
-            model="bulbul:v3",
-            voice="ritu",
-            language=target_language
+    # 4. Setup TTS Service
+    tts_provider = tts_provider.lower()
+    if tts_provider == "elevenlabs":
+        eleven_key = settings.ELEVENLABS_API_KEY
+        if not eleven_key:
+            raise ValueError("ELEVENLABS_API_KEY is not configured on the backend.")
+        tts = ElevenLabsTTSService(
+            api_key=eleven_key,
+            settings=ElevenLabsTTSService.Settings(
+                voice="Xb7hH8MSUJpSbSDYk0k2",
+                model="eleven_flash_v2_5",
+            )
         )
-    )
+    elif tts_provider == "deepgram":
+        tts = DeepgramTTSService(api_key=deepgram_key)
+    else:
+        sarvam_key = settings.SARVAM_API_KEY
+        if not sarvam_key:
+            raise ValueError("SARVAM_API_KEY is not configured on the backend.")
+        language_map = {
+            "en": "en-IN",
+            "hi": "hi-IN",
+            "kn": "kn-IN",
+        }
+        target_language = language_map.get(language, "en-IN")
+        tts = SarvamTTSService(
+            api_key=sarvam_key,
+            sample_rate=16000,
+            settings=SarvamTTSService.Settings(
+                model="bulbul:v3",
+                voice="ritu",
+                language=target_language
+            )
+        )
 
     # 3. Setup LLM Context & System Prompt & Tool Schemas
     tools = [
@@ -304,6 +410,134 @@ async def run_voice_agent(
             description="Retrieve clinic contact info, opening hours, and timezone.",
             properties={},
             required=[]
+        ),
+        FunctionSchema(
+            name="cancel_appointment",
+            description="Cancel a scheduled appointment by ID.",
+            properties={
+                "appointment_id": {
+                    "type": "integer",
+                    "description": "Unique Appointment ID"
+                }
+            },
+            required=["appointment_id"]
+        ),
+        FunctionSchema(
+            name="reschedule_appointment",
+            description="Reschedule an existing appointment to a new date (YYYY-MM-DD) and time (HH:MM).",
+            properties={
+                "appointment_id": {
+                    "type": "integer",
+                    "description": "The unique Appointment ID"
+                },
+                "new_date": {
+                    "type": "string",
+                    "description": "New date in YYYY-MM-DD"
+                },
+                "new_time": {
+                    "type": "string",
+                    "description": "New time in HH:MM"
+                }
+            },
+            required=["appointment_id", "new_date", "new_time"]
+        ),
+        FunctionSchema(
+            name="check_insurance_status",
+            description="Call the external REST API mock service to verify patient insurance policy and coverage copay details.",
+            properties={
+                "policy_number": {
+                    "type": "string",
+                    "description": "The insurance policy number"
+                },
+                "patient_name": {
+                    "type": "string",
+                    "description": "Name of the policy holder"
+                }
+            },
+            required=["policy_number", "patient_name"]
+        ),
+        FunctionSchema(
+            name="update_session_variable",
+            description="Save or update a generic patient session state variable extracted from natural language (e.g. patient_name, doctor_name).",
+            properties={
+                "name": {
+                    "type": "string",
+                    "description": "Name of the variable (e.g. patient_name, doctor_name, etc.)"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Value to store in the variable"
+                }
+            },
+            required=["name", "value"]
+        ),
+        FunctionSchema(
+            name="check_calendar_availability",
+            description="Query the external Google Calendar service to check if the time slot (ISO8601 datetimes) is free.",
+            properties={
+                "start_time_str": {
+                    "type": "string",
+                    "description": "Start datetime in ISO8601 format (e.g. 2026-08-18T10:00:00)"
+                },
+                "end_time_str": {
+                    "type": "string",
+                    "description": "End datetime in ISO8601 format (e.g. 2026-08-18T10:30:00)"
+                }
+            },
+            required=["start_time_str", "end_time_str"]
+        ),
+        FunctionSchema(
+            name="create_calendar_event",
+            description="Create a calendar event directly in Google Calendar.",
+            properties={
+                "summary": {
+                    "type": "string",
+                    "description": "Short title of the event"
+                },
+                "start_time_str": {
+                    "type": "string",
+                    "description": "Start datetime in ISO8601 format"
+                },
+                "end_time_str": {
+                    "type": "string",
+                    "description": "End datetime in ISO8601 format"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional details description"
+                }
+            },
+            required=["summary", "start_time_str", "end_time_str"]
+        ),
+        FunctionSchema(
+            name="update_calendar_event",
+            description="Update an existing Google Calendar event times.",
+            properties={
+                "event_id": {
+                    "type": "string",
+                    "description": "Google Calendar event ID"
+                },
+                "start_time_str": {
+                    "type": "string",
+                    "description": "New start datetime in ISO8601 format"
+                },
+                "end_time_str": {
+                    "type": "string",
+                    "description": "New end datetime in ISO8601 format"
+                }
+            },
+            required=["event_id", "start_time_str", "end_time_str"]
+        ),
+        FunctionSchema(
+            name="delete_calendar_event",
+            description="Remove/delete an event from Google Calendar.",
+            properties={
+                "event_id": {
+                    "type": "string",
+                    "description": "Google Calendar event ID to delete"
+                }
+            },
+            required=["event_id"]
         )
     ]
 
@@ -329,10 +563,19 @@ async def run_voice_agent(
     llm.register_function("get_doctor_info", get_doctor_info_handler)
 
     async def check_availability_handler(params: FunctionCallParams):
+        import json
         doctor_id = params.arguments.get("doctor_id")
         date = params.arguments.get("date")
         preferred_time = params.arguments.get("preferred_time")
         res = AvailabilityTool.check_availability(int(doctor_id), date, preferred_time)
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "appointment_extracted_update",
+                "date": date,
+                "time": preferred_time or ""
+            }))
+        except Exception as e:
+            logger.error(f"Failed to send extracted date/time update to client: {e}")
         await params.result_callback(res)
     llm.register_function("check_availability", check_availability_handler)
 
@@ -345,18 +588,135 @@ async def run_voice_agent(
         res = BookingTool.book_appointment(int(doctor_id), date, time, patient_name, patient_phone)
         await params.result_callback(res)
     llm.register_function("book_appointment", book_appointment_handler)
+    async def cancel_appointment_handler(params: FunctionCallParams):
+        appointment_id = params.arguments.get("appointment_id")
+        res = CancellationTool.cancel_appointment(int(appointment_id))
+        await params.result_callback(res)
+    llm.register_function("cancel_appointment", cancel_appointment_handler)
 
+    async def reschedule_appointment_handler(params: FunctionCallParams):
+        appointment_id = params.arguments.get("appointment_id")
+        new_date = params.arguments.get("new_date")
+        new_time = params.arguments.get("new_time")
+        res = RescheduleTool.reschedule_appointment(int(appointment_id), new_date, new_time)
+        await params.result_callback(res)
+    llm.register_function("reschedule_appointment", reschedule_appointment_handler)
 
+    async def check_insurance_status_handler(params: FunctionCallParams):
+        policy_number = params.arguments.get("policy_number")
+        patient_name = params.arguments.get("patient_name")
+        res = await ExternalAPITool.check_insurance_status(policy_number, patient_name, dynamic_vars=session_vars)
+        await params.result_callback(res)
+    llm.register_function("check_insurance_status", check_insurance_status_handler)
+
+    async def update_session_variable_handler(params: FunctionCallParams):
+        import json
+        name = params.arguments.get("name")
+        value = params.arguments.get("value")
+        
+        # Enforce rule: do not automatically create arbitrary new variable names
+        if name not in session_vars:
+            logger.warning(f"Rejection of automatic dynamic variable creation: {name} = {value}")
+            await params.result_callback({
+                "status": "error",
+                "message": f"Variable '{name}' is not configured in this session. You can only update pre-existing variables."
+            })
+            return
+
+        old_value = session_vars.get(name, "")
+        session_vars[name] = value
+        logger.info(
+            f"[DYNAMIC VARIABLE]\n"
+            f"source=conversation\n"
+            f"key={name}\n"
+            f"old_value={old_value}\n"
+            f"new_value={value}"
+        )
+        
+        # Persist updated value in database
+        if session_id:
+            from ..database import SessionLocal
+            from ..models import SessionVariable
+            db = SessionLocal()
+            try:
+                existing = db.query(SessionVariable).filter(
+                    SessionVariable.session_id == session_id,
+                    SessionVariable.variable_name == name
+                ).first()
+                if existing:
+                    existing.variable_value = value
+                else:
+                    new_var = SessionVariable(
+                        session_id=session_id,
+                        variable_name=name,
+                        variable_value=value
+                    )
+                    db.add(new_var)
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to persist updated variable to database: {e}")
+                db.rollback()
+            finally:
+                db.close()
+
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "variable_extracted",
+                "name": name,
+                "value": value,
+                "all_variables": session_vars
+            }))
+        except Exception as e:
+            logger.error(f"Failed to send variables update to client: {e}")
+        await params.result_callback({"status": "success", "session_variables": session_vars})
+    llm.register_function("update_session_variable", update_session_variable_handler)
 
     async def get_clinic_info_handler(params: FunctionCallParams):
         res = ClinicInfoTool.get_clinic_info()
         await params.result_callback(res)
     llm.register_function("get_clinic_info", get_clinic_info_handler)
 
+    async def check_calendar_availability_handler(params: FunctionCallParams):
+        start_time_str = params.arguments.get("start_time_str")
+        end_time_str = params.arguments.get("end_time_str")
+        res = GoogleCalendarTool.check_calendar_availability(start_time_str, end_time_str)
+        await params.result_callback(res)
+    llm.register_function("check_calendar_availability", check_calendar_availability_handler)
+
+    async def create_calendar_event_handler(params: FunctionCallParams):
+        summary = params.arguments.get("summary")
+        start_time_str = params.arguments.get("start_time_str")
+        end_time_str = params.arguments.get("end_time_str")
+        description = params.arguments.get("description", "")
+        res = GoogleCalendarTool.create_calendar_event(summary, start_time_str, end_time_str, description)
+        await params.result_callback(res)
+    llm.register_function("create_calendar_event", create_calendar_event_handler)
+
+    async def update_calendar_event_handler(params: FunctionCallParams):
+        event_id = params.arguments.get("event_id")
+        start_time_str = params.arguments.get("start_time_str")
+        end_time_str = params.arguments.get("end_time_str")
+        res = GoogleCalendarTool.update_calendar_event(event_id, start_time_str, end_time_str)
+        await params.result_callback(res)
+    llm.register_function("update_calendar_event", update_calendar_event_handler)
+
+    async def delete_calendar_event_handler(params: FunctionCallParams):
+        event_id = params.arguments.get("event_id")
+        res = GoogleCalendarTool.delete_calendar_event(event_id)
+        await params.result_callback(res)
+    llm.register_function("delete_calendar_event", delete_calendar_event_handler)
+
+
     # 5. Build Pipeline
     activity_monitor = ActivityMonitor(context)
-    pipeline = Pipeline([
-        transport.input(),
+    pipeline_steps = [transport.input()]
+    
+    if stt_provider == "elevenlabs":
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.processors.audio.vad_processor import VADProcessor
+        pipeline_steps.append(VADProcessor(vad_analyzer=SileroVADAnalyzer()))
+
+    pipeline_steps.extend([
         stt,
         aggregators.user(),
         llm,
@@ -365,9 +725,18 @@ async def run_voice_agent(
         transport.output(),
         aggregators.assistant()
     ])
+    pipeline = Pipeline(pipeline_steps)
 
     # Start runner
     runner = PipelineRunner()
     task = PipelineTask(pipeline)
     activity_monitor.task = task
-    await runner.run(task)
+
+    @transport.event_handler("on_connected")
+    async def on_connected(transport, client):
+        logger.info("WebSocket connected, sending initial LLMContextFrame to trigger greeting.")
+        await task.queue_frame(LLMContextFrame(context))
+    try:
+        await runner.run(task)
+    finally:
+        await session.close()

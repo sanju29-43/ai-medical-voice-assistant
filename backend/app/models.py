@@ -75,3 +75,17 @@ class Appointment(Base):
     
     doctor = relationship("Doctor", back_populates="appointments")
     clinic = relationship("Clinic", back_populates="appointments")
+
+from sqlalchemy import UniqueConstraint, Index
+
+class SessionVariable(Base):
+    __tablename__ = "session_variables"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, nullable=False, index=True)
+    variable_name = Column(String, nullable=False)
+    variable_value = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('session_id', 'variable_name', name='_session_variable_uc'),
+    )

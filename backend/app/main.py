@@ -6,7 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from .database import get_db, init_db
-from .models import Clinic, Doctor, Availability, Appointment, AppointmentStatus, AvailabilityStatus
+from .models import Clinic, Doctor, Availability, Appointment, AppointmentStatus, AvailabilityStatus, SessionVariable
 from .validation import validate_appointment_booking
 from .config import settings
 
@@ -358,26 +358,109 @@ import asyncio
 import traceback
 from .voice.agent import run_voice_agent
 
+import uuid
+import json
+
 class SessionRequest(BaseModel):
     language: str = "en"
+    stt_provider: str = "deepgram"
+    tts_provider: str = "sarvam"
+    variables: dict = {}
+
+# In-memory session store
+VOICE_SESSIONS = {}
+
+class VariableCreateSchema(BaseModel):
+    session_id: str
+    name: str
+    value: str
+
+@app.post("/api/variables")
+def create_or_update_variable(var: VariableCreateSchema, db: Session = Depends(get_db)):
+    session_id = var.session_id
+    name = var.name
+    value = var.value
+    
+    if session_id in VOICE_SESSIONS:
+        if "variables" not in VOICE_SESSIONS[session_id]:
+            VOICE_SESSIONS[session_id]["variables"] = {}
+        VOICE_SESSIONS[session_id]["variables"][name] = value
+
+    existing = db.query(SessionVariable).filter(
+        SessionVariable.session_id == session_id,
+        SessionVariable.variable_name == name
+    ).first()
+    
+    if existing:
+        existing.variable_value = value
+    else:
+        new_var = SessionVariable(
+            session_id=session_id,
+            variable_name=name,
+            variable_value=value
+        )
+        db.add(new_var)
+    db.commit()
+    return {"status": "success", "session_id": session_id, "name": name, "value": value}
 
 @app.post("/api/voice/session")
-async def start_voice_session(req: SessionRequest, request: Request):
+async def start_voice_session(req: SessionRequest, request: Request, db: Session = Depends(get_db)):
+    session_id = uuid.uuid4().hex
+    VOICE_SESSIONS[session_id] = {
+        "language": req.language,
+        "stt_provider": req.stt_provider,
+        "tts_provider": req.tts_provider,
+        "variables": req.variables
+    }
+    
+    for name, value in req.variables.items():
+        new_var = SessionVariable(
+            session_id=session_id,
+            variable_name=name,
+            variable_value=value
+        )
+        db.add(new_var)
+    db.commit()
+
     scheme = "wss" if request.url.scheme == "https" else "ws"
     host = request.headers.get("host", "localhost:8000")
-    ws_url = f"{scheme}://{host}/ws?language={req.language}"
-    return {"status": "started", "transport": "websocket", "ws_url": ws_url}
+    ws_url = f"{scheme}://{host}/ws?session_id={session_id}"
+    return {
+        "status": "started",
+        "transport": "websocket",
+        "ws_url": ws_url,
+        "session_id": session_id
+    }
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    language = websocket.query_params.get("language", "en")
+    session_id = websocket.query_params.get("session_id")
+    
+    # Load session configuration if exists, else fallback to defaults
+    session = VOICE_SESSIONS.get(session_id, {})
+    language = session.get("language", "en")
+    stt_provider = session.get("stt_provider", "deepgram")
+    tts_provider = session.get("tts_provider", "sarvam")
+    variables = session.get("variables", {})
+
     try:
-        await run_voice_agent(websocket=websocket, language=language)
+        await run_voice_agent(
+            websocket=websocket,
+            language=language,
+            stt_provider=stt_provider,
+            tts_provider=tts_provider,
+            variables=variables,
+            session_id=session_id
+        )
     except WebSocketDisconnect:
         pass
     except Exception as e:
         print(f"Error in WebSocket session: {e}")
         traceback.print_exc()
+    finally:
+        # Clean up session memory when call ends
+        if session_id in VOICE_SESSIONS:
+            VOICE_SESSIONS.pop(session_id, None)
 
 

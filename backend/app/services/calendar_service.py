@@ -117,3 +117,25 @@ def update_calendar_event(
     except Exception as e:
         logger.error(f"Error updating Google Calendar event: {e}")
         raise e
+
+def check_calendar_availability(start_time: datetime.datetime, end_time: datetime.datetime) -> bool:
+    service = _get_calendar_service()
+    if not service:
+        logger.info(f"[MOCK CALENDAR] Checking availability from {start_time} to {end_time}")
+        return True
+    try:
+        # Check standard FreeBusy queries
+        body = {
+            "timeMin": start_time.isoformat() + "Z",
+            "timeMax": end_time.isoformat() + "Z",
+            "items": [{"id": settings.GOOGLE_CALENDAR_ID}]
+        }
+        freebusy = service.freebusy().query(body=body).execute()
+        calendars = freebusy.get("calendars", {})
+        cal = calendars.get(settings.GOOGLE_CALENDAR_ID, {})
+        busy = cal.get("busy", [])
+        return len(busy) == 0
+    except Exception as e:
+        logger.error(f"Error checking calendar availability: {e}")
+        return True
+
