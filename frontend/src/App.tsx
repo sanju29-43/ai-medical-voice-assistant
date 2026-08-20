@@ -18,14 +18,6 @@ export default function App() {
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
   const [activeSessionId, setActiveSessionId] = useState<string>('');
-  const [doctorsList, setDoctorsList] = useState<any[]>([]);
-
-  useEffect(() => {
-    fetch(API_URL + '/api/doctors')
-      .then(res => res.json())
-      .then(data => setDoctorsList(data))
-      .catch(() => {});
-  }, []);
 
   // Real-time extracted appointment state
   const [appointmentInfo, setAppointmentInfo] = useState<{
@@ -197,25 +189,10 @@ export default function App() {
             const msg = JSON.parse(e.data);
             if (msg.type === 'appointment_extracted') {
               setAppointmentInfo(msg.data);
-            } else if (msg.type === 'appointment_extracted_update') {
-              setAppointmentInfo(prev => ({
-                ...prev,
-                date: msg.date || prev.date,
-                time: msg.time || prev.time
-              }));
             } else if (msg.type === 'variable_extracted') {
               const allVars = msg.all_variables || {};
               const list = Object.keys(allVars).map(k => ({ key: k, value: allVars[k] }));
               setVariables(list);
-              if (allVars.doctor_name) {
-                const docName = allVars.doctor_name;
-                const matchedDoc = doctorsList.find(d => d.name.toLowerCase().includes(docName.toLowerCase()));
-                setAppointmentInfo(prev => ({
-                  ...prev,
-                  doctor: docName,
-                  specialty: matchedDoc ? matchedDoc.specialization : '—'
-                }));
-              }
             }
           }
         } catch (err) {

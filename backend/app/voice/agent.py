@@ -563,19 +563,10 @@ async def run_voice_agent(
     llm.register_function("get_doctor_info", get_doctor_info_handler)
 
     async def check_availability_handler(params: FunctionCallParams):
-        import json
         doctor_id = params.arguments.get("doctor_id")
         date = params.arguments.get("date")
         preferred_time = params.arguments.get("preferred_time")
         res = AvailabilityTool.check_availability(int(doctor_id), date, preferred_time)
-        try:
-            await websocket.send_text(json.dumps({
-                "type": "appointment_extracted_update",
-                "date": date,
-                "time": preferred_time or ""
-            }))
-        except Exception as e:
-            logger.error(f"Failed to send extracted date/time update to client: {e}")
         await params.result_callback(res)
     llm.register_function("check_availability", check_availability_handler)
 
